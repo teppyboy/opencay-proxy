@@ -32,6 +32,7 @@ The proxy always uses a streaming request upstream. It returns SSE when the clie
 
     cargo run                          # info logs, port 8310 (OPCAY_PORT/PORT env respected)
     cargo run -- -p 9000               # custom port
+    cargo run -- --host 0.0.0.0        # expose on your LAN (default: localhost only)
     cargo run -- -d                    # debug logs
     cargo run -- -v                    # trace logs
     cargo run -- --log-level warn      # explicit level

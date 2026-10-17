@@ -41,6 +41,9 @@ struct Cli {
     /// TCP port to listen on (overrides OPCAY_PORT/PORT env)
     #[arg(short, long)]
     port: Option<u16>,
+    /// Bind to all interfaces (0.0.0.0) instead of localhost
+    #[arg(long)]
+    host: Option<String>,
     /// Log at debug level
     #[arg(short = 'd', long)]
     debug: bool,
@@ -79,8 +82,9 @@ async fn main() -> Result<(), opencode::BoxError> {
         .or_else(|| std::env::var("OPCAY_PORT").ok())
         .or_else(|| std::env::var("PORT").ok())
         .unwrap_or_else(|| "8310".to_string());
-    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}")).await?;
-    tracing::info!(%port, "opencay-proxy listening");
+    let host = cli.host.unwrap_or_else(|| "127.0.0.1".to_string());
+    let listener = tokio::net::TcpListener::bind(format!("{host}:{port}")).await?;
+    tracing::info!(%host, %port, "opencay-proxy listening");
     axum::serve(listener, app()).await?;
     Ok(())
 }
