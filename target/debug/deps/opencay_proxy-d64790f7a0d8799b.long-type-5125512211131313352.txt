@@ -1,1 +1,0 @@
-std::iter::Chain<std::iter::Enumerate<std::slice::Iter<'_, Duration>>, std::iter::Once<&Duration>>

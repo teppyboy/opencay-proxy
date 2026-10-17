@@ -140,6 +140,7 @@ pub async fn chat_stream_with_retry(request: ChatRequest) -> Result<ChatStream> 
                 if !retry || attempt == 3 {
                     return Err(error);
                 }
+                tracing::warn!(attempt = attempt + 1, backoff_secs = backoff.as_secs(), "upstream flap, retrying");
                 tokio::time::sleep(*backoff).await;
             }
         }
@@ -167,6 +168,7 @@ async fn send_chat_stream(request: &ChatRequest) -> Result<ChatStream> {
         .json(&body)
         .send()
         .await?;
+    tracing::debug!(model = %request.model, "upstream request sent");
     ensure_success(response).await
 }
 
@@ -301,7 +303,7 @@ mod tests {
                     break;
                 }
                 Err(e) if attempt < 5 => {
-                    eprintln!("upstream rejected (attempt {attempt}): {e}; retrying");
+                    tracing::warn!(attempt, error = %e, "upstream rejected, retrying");
                     tokio::time::sleep(std::time::Duration::from_secs(20)).await;
                 }
                 Err(e) => panic!("upstream never accepted: {e}"),

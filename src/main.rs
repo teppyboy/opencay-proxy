@@ -28,13 +28,55 @@ struct IncomingChatRequest {
     stream: bool,
 }
 
+use clap::Parser;
+use tracing_subscriber::EnvFilter;
+
+#[derive(Parser, Debug)]
+#[command(name = "opencay-proxy", version, about = "OpenAI-compatible proxy for the OpenCode free tier")]
+struct Cli {
+    /// TCP port to listen on (overrides OPCAY_PORT/PORT env)
+    #[arg(short, long)]
+    port: Option<u16>,
+    /// Log at debug level
+    #[arg(short = 'd', long)]
+    debug: bool,
+    /// Log at trace level
+    #[arg(short = 'v', long)]
+    verbose: bool,
+    /// Explicit log level (overrides --debug/--verbose)
+    #[arg(long)]
+    log_level: Option<String>,
+}
+
+fn init_tracing(cli: &Cli) {
+    let level = if let Some(level) = &cli.log_level {
+        level.clone()
+    } else if cli.verbose {
+        "trace".to_string()
+    } else if cli.debug {
+        "debug".to_string()
+    } else {
+        "info".to_string()
+    };
+    // RUST_LOG always wins over flags when set.
+    let filter = std::env::var("RUST_LOG").unwrap_or(level);
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::try_new(&filter).unwrap_or_else(|_| EnvFilter::new("info")))
+        .init();
+}
+
 #[tokio::main]
 async fn main() -> Result<(), opencode::BoxError> {
-    let port = std::env::var("OPCAY_PORT")
-        .or_else(|_| std::env::var("PORT"))
-        .unwrap_or_else(|_| "8310".to_string());
+    let cli = Cli::parse();
+    init_tracing(&cli);
+    let port = cli
+        .port
+        .map(|port| port.to_string())
+        .or_else(|| std::env::var("OPCAY_PORT").ok())
+        .or_else(|| std::env::var("PORT").ok())
+        .unwrap_or_else(|| "8310".to_string());
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}")).await?;
-    eprintln!("opencay-proxy listening on http://127.0.0.1:{port}");
+    tracing::info!(%port, "opencay-proxy listening");
     axum::serve(listener, app()).await?;
     Ok(())
 }
@@ -74,6 +116,8 @@ async fn models() -> Response {
 }
 
 async fn chat_completions(request: Request) -> Response {
+    let started = std::time::Instant::now();
+    tracing::debug!(method = %request.method(), uri = %request.uri(), "incoming request");
     let body = match axum::body::to_bytes(request.into_body(), usize::MAX).await {
         Ok(body) => body,
         Err(error) => {
@@ -102,12 +146,14 @@ async fn chat_completions(request: Request) -> Response {
             .or(incoming.max_completion_tokens)
             .unwrap_or(4096),
     };
+    let chat_started = std::time::Instant::now();
     let upstream = match opencode::chat_stream_with_retry(request_data).await {
         Ok(stream) => stream,
         Err(error) => return provider_error(error),
     };
 
     if incoming.stream {
+        tracing::info!(model = %model, streamed = true, duration_ms = chat_started.elapsed().as_millis() as u64, "chat completion ready (streaming)");
         let body = Body::from_stream(sse_stream(upstream, model));
         Response::builder()
             .status(StatusCode::OK)
@@ -125,6 +171,7 @@ async fn chat_completions(request: Request) -> Response {
             Ok(chunks) => chunks,
             Err(error) => return provider_error(error),
         };
+        tracing::info!(model = %model, streamed = false, duration_ms = chat_started.elapsed().as_millis() as u64, "chat completion aggregated");
         json_response(StatusCode::OK, aggregate_chunks(&chunks, &model))
     }
 }
@@ -159,6 +206,7 @@ fn sse_stream(
                 }
                 Some(Err(error)) => {
                     state.done = true;
+                    tracing::error!(error = %error, "upstream stream failed mid-response");
                     Some((
                         Ok(Bytes::from(format!(
                             "data: {}\n\n",
@@ -185,6 +233,7 @@ fn json_response(status: StatusCode, value: Value) -> Response {
 }
 
 fn provider_error(error: opencay_proxy::provider::opencode::BoxError) -> Response {
+    tracing::error!(error = %error, "request failed");
     if let Some(error) = error.downcast_ref::<opencode::UpstreamError>() {
         Response::builder()
             .status(StatusCode::from_u16(error.status).unwrap_or(StatusCode::BAD_GATEWAY))
@@ -219,11 +268,17 @@ fn with_required_tools(mut tools: Vec<Value>) -> Vec<Value> {
         .iter()
         .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_string))
         .collect();
+    let mut injected = Vec::new();
     if !names.iter().any(|name| name == "bash") {
+        injected.push("bash");
         tools.push(required_tool("bash", "Execute a shell command", "command"));
     }
     if !names.iter().any(|name| name == "read") {
+        injected.push("read");
         tools.push(required_tool("read", "Read a file", "path"));
+    }
+    if !injected.is_empty() {
+        tracing::debug!(tools = ?injected, "injected gate-required tools");
     }
     tools
 }
