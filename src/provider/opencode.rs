@@ -140,7 +140,11 @@ pub async fn chat_stream_with_retry(request: ChatRequest) -> Result<ChatStream> 
                 if !retry || attempt == 3 {
                     return Err(error);
                 }
-                tracing::warn!(attempt = attempt + 1, backoff_secs = backoff.as_secs(), "upstream flap, retrying");
+                tracing::warn!(
+                    attempt = attempt + 1,
+                    backoff_secs = backoff.as_secs(),
+                    "upstream flap, retrying"
+                );
                 tokio::time::sleep(*backoff).await;
             }
         }

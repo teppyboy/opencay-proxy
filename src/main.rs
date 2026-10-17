@@ -32,7 +32,11 @@ use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
-#[command(name = "opencay-proxy", version, about = "OpenAI-compatible proxy for the OpenCode free tier")]
+#[command(
+    name = "opencay-proxy",
+    version,
+    about = "OpenAI-compatible proxy for the OpenCode free tier"
+)]
 struct Cli {
     /// TCP port to listen on (overrides OPCAY_PORT/PORT env)
     #[arg(short, long)]
@@ -116,7 +120,7 @@ async fn models() -> Response {
 }
 
 async fn chat_completions(request: Request) -> Response {
-    let started = std::time::Instant::now();
+    let chat_started = std::time::Instant::now();
     tracing::debug!(method = %request.method(), uri = %request.uri(), "incoming request");
     let body = match axum::body::to_bytes(request.into_body(), usize::MAX).await {
         Ok(body) => body,
@@ -146,7 +150,6 @@ async fn chat_completions(request: Request) -> Response {
             .or(incoming.max_completion_tokens)
             .unwrap_or(4096),
     };
-    let chat_started = std::time::Instant::now();
     let upstream = match opencode::chat_stream_with_retry(request_data).await {
         Ok(stream) => stream,
         Err(error) => return provider_error(error),
