@@ -42,7 +42,7 @@ curl -N -X POST 'https://opencode.ai/inference/openai/v1/chat/completions' \
 |---|---|---|
 | `x-opencode-session` with **descending-encoded** timestamp | **REQUIRED** | plain-ms-hex session → 403 (T23); encoded → 200 (T18, T24) |
 | `User-Agent: opencode/<…>` | **REQUIRED** | curl/foreign/absent UA → 403 (round 1, issue #49433); `opencode/1.19.3`, `opencode/latest/1.19.3/cli`, SDK-suffixed UA all pass (tests 06, 07) |
-| `tools` present (≥1; even minimal schemas, `bash` name ok) | **REQUIRED** | full headers but no tools → 403 (test 04); minimal bash/read schemas → 200 (T24) |
+| `tools` containing BOTH `bash` and `read` (minimal schemas ok) | **REQUIRED** | bash-only → 403 in 4/4 healthy windows (T26, 2026-10-17 evening); bash+read minimal → 200 (T24). Proxy must inject missing ones. |
 | `stream: true` | required per #49433 | not re-isolated today; keep it |
 | `x-opencode-session-id` | NOT required | test 11 → 200 without it |
 | `x-opencode-client` | NOT required | test 12 → 200 |
@@ -79,6 +79,12 @@ fn session_id() -> String {
 
 Matches `packages/schema/src/identifier.ts` exactly (spec: `identity.md` §1, counter resets per
 timestamp; gate does not check counter > 1).
+
+## Load flapping (2026-10-17 evening)
+
+The free tier alternates 200 / 429 / 403-FreeTierError on IDENTICAL verified requests within
+minutes (12 windows sampled). 403s under load are false positives — always retry with backoff
+before treating a 403 as a fingerprint failure.
 
 ## Why round 1 failed
 
