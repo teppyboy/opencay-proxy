@@ -154,7 +154,7 @@ async fn chat_completions(request: Request) -> Response {
             .or(incoming.max_completion_tokens)
             .unwrap_or(4096),
     };
-    let upstream = match opencode::chat_stream_with_retry(request_data).await {
+    let upstream = match opencode::chat_stream(request_data).await {
         Ok(stream) => stream,
         Err(error) => return provider_error(error),
     };
@@ -252,42 +252,8 @@ fn provider_error(error: opencay_proxy::provider::opencode::BoxError) -> Respons
     }
 }
 
-fn required_tool(name: &str, description: &str, parameter: &str) -> Value {
-    json!({
-        "type": "function",
-        "function": {
-            "name": name,
-            "description": description,
-            "parameters": {
-                "type": "object",
-                "properties": {parameter: {"type": "string"}},
-                "required": [parameter]
-            }
-        }
-    })
-}
-
-// The free-tier gate rejects requests whose tools lack bash or read (verified 2026-10-17:
-// bash-only -> 403, bash+read -> 200). Inject whichever is missing; the harness never sees
-// them unless the model calls one.
-fn with_required_tools(mut tools: Vec<Value>) -> Vec<Value> {
-    let names: Vec<String> = tools
-        .iter()
-        .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_string))
-        .collect();
-    let mut injected = Vec::new();
-    if !names.iter().any(|name| name == "bash") {
-        injected.push("bash");
-        tools.push(required_tool("bash", "Execute a shell command", "command"));
-    }
-    if !names.iter().any(|name| name == "read") {
-        injected.push("read");
-        tools.push(required_tool("read", "Read a file", "path"));
-    }
-    if !injected.is_empty() {
-        tracing::debug!(tools = ?injected, "injected gate-required tools");
-    }
-    tools
+fn with_required_tools(tools: Vec<Value>) -> Vec<Value> {
+    opencode::with_required_tools(tools)
 }
 
 fn error_json(message: String) -> Value {
@@ -419,7 +385,7 @@ mod tests {
             .iter()
             .filter_map(|tool| tool["function"]["name"].as_str())
             .collect();
-        assert_eq!(names, ["glob", "bash", "read"]);
+        assert_eq!(names, ["glob", "read", "shell"]);
         let kept = with_required_tools(injected);
         assert_eq!(kept.len(), 3);
     }
@@ -452,32 +418,23 @@ mod tests {
             axum::serve(listener, app()).await.unwrap();
         });
         let client = reqwest::Client::new();
+        let response = client
+            .post(format!("http://{address}/v1/chat/completions"))
+            .json(&json!({
+                "model": "glm-5.3-flash-free",
+                "messages": [{"role":"user","content":"Reply with exactly OK"}],
+                "stream": true
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
         let mut count = 0;
-        for attempt in 0..3 {
-            let response = client
-                .post(format!("http://{address}/v1/chat/completions"))
-                .json(&json!({
-                    "model": "glm-5.3-flash-free",
-                    "messages": [{"role":"user","content":"Reply with exactly OK"}],
-                    "stream": true
-                }))
-                .send()
-                .await
-                .unwrap();
-            if (response.status() == reqwest::StatusCode::FORBIDDEN
-                || response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS)
-                && attempt < 2
-            {
-                continue;
+        let mut chunks = response.bytes_stream();
+        while let Some(chunk) = chunks.next().await {
+            if !chunk.unwrap().is_empty() {
+                count += 1;
             }
-            assert!(response.status().is_success());
-            let mut chunks = response.bytes_stream();
-            while let Some(chunk) = chunks.next().await {
-                if !chunk.unwrap().is_empty() {
-                    count += 1;
-                }
-            }
-            break;
         }
         assert!(count > 1);
     }
