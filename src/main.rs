@@ -7,7 +7,7 @@ use axum::{
     Router,
 };
 use futures_util::{stream, Stream, StreamExt};
-use opencay_proxy::config::{Provider, RuntimeConfig};
+use opencay_proxy::config::RuntimeConfig;
 use opencay_proxy::provider::opencode::{self, ChatRequest};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -117,17 +117,7 @@ async fn models() -> Response {
     };
     match opencode::list_models(&config).await {
         Ok(models) => {
-            let data: Vec<_> = models
-                .into_iter()
-                .map(|model| {
-                    json!({
-                        "id": model.id,
-                        "object": "model",
-                        "created": unix_seconds(),
-                        "owned_by": match model.provider { Provider::Zen => "opencode-zen", Provider::Go => "opencode-go" }
-                    })
-                })
-                .collect();
+            let data: Vec<_> = models.into_iter().map(|model| model.raw).collect();
             json_response(StatusCode::OK, json!({"object":"list","data":data}))
         }
         Err(error) => provider_error(error),

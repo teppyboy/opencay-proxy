@@ -1,24 +1,20 @@
 use super::protocol::Protocol;
 use crate::config::{Provider, RuntimeConfig};
-use serde::Deserialize;
+use serde_json::Value;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub struct ModelInfo {
     pub id: String,
+    pub raw: Value,
     pub provider: Provider,
     pub protocol: Protocol,
     pub free: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 struct ModelsResponse {
-    data: Vec<ModelEntry>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ModelEntry {
-    id: String,
+    data: Vec<Value>,
 }
 
 pub async fn fetch(config: &RuntimeConfig) -> Result<HashMap<String, ModelInfo>, reqwest::Error> {
@@ -59,16 +55,19 @@ async fn add_models(
         .error_for_status()?
         .json::<ModelsResponse>()
         .await?;
-    for model in response.data {
-        let free =
-            model.id.ends_with("-free") || model.id == "big-pickle" || model.id == "beam-free";
+    for raw in response.data {
+        let Some(id) = raw.get("id").and_then(Value::as_str).map(str::to_owned) else {
+            continue;
+        };
+        let free = id.ends_with("-free") || id == "big-pickle";
         if free || include_paid {
             catalog.insert(
-                model.id.clone(),
+                id.clone(),
                 ModelInfo {
-                    id: model.id.clone(),
+                    id: id.clone(),
+                    raw,
                     provider,
-                    protocol: protocol_for(provider, &model.id),
+                    protocol: protocol_for(provider, &id),
                     free,
                 },
             );
