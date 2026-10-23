@@ -7,6 +7,7 @@ use axum::{
     Router,
 };
 use futures_util::{stream, Stream, StreamExt};
+use opencay_proxy::config::{Provider, RuntimeConfig};
 use opencay_proxy::provider::opencode::{self, ChatRequest};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -75,6 +76,7 @@ fn init_tracing(cli: &Cli) {
 #[tokio::main]
 async fn main() -> Result<(), opencode::BoxError> {
     let cli = Cli::parse();
+    RuntimeConfig::load("config.toml")?;
     init_tracing(&cli);
     let port = cli
         .port
@@ -104,16 +106,25 @@ async fn not_found() -> Response {
 }
 
 async fn models() -> Response {
-    match opencode::list_models().await {
+    let config = match RuntimeConfig::load("config.toml") {
+        Ok(config) => config,
+        Err(error) => {
+            return json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                error_json(error.to_string()),
+            )
+        }
+    };
+    match opencode::list_models(&config).await {
         Ok(models) => {
             let data: Vec<_> = models
                 .into_iter()
-                .map(|id| {
+                .map(|model| {
                     json!({
-                        "id": id,
+                        "id": model.id,
                         "object": "model",
                         "created": unix_seconds(),
-                        "owned_by": "opencode"
+                        "owned_by": match model.provider { Provider::Zen => "opencode-zen", Provider::Go => "opencode-go" }
                     })
                 })
                 .collect();
@@ -145,14 +156,44 @@ async fn chat_completions(request: Request) -> Response {
         }
     };
     let model = incoming.model.clone();
+    let config = match RuntimeConfig::load("config.toml") {
+        Ok(config) => config,
+        Err(error) => {
+            return json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                error_json(error.to_string()),
+            )
+        }
+    };
+    let catalog = match opencode::list_models(&config).await {
+        Ok(models) => models,
+        Err(error) => return provider_error(error),
+    };
+    let Some(info) = catalog
+        .into_iter()
+        .find(|info| info.id == model.split('(').next().unwrap_or(&model))
+    else {
+        return json_response(
+            StatusCode::NOT_FOUND,
+            error_json(format!("Model is not available: {model}")),
+        );
+    };
+    let tools = if info.free {
+        with_required_tools(incoming.tools)
+    } else {
+        incoming.tools
+    };
     let request_data = ChatRequest {
         model: model.clone(),
         messages: incoming.messages,
-        tools: with_required_tools(incoming.tools),
+        tools,
         max_tokens: incoming
             .max_tokens
             .or(incoming.max_completion_tokens)
             .unwrap_or(4096),
+        provider: info.provider,
+        protocol: info.protocol,
+        api_key: config.next_key(info.provider),
     };
     let upstream = match opencode::chat_stream(request_data).await {
         Ok(stream) => stream,

@@ -257,6 +257,9 @@ mod tests {
             messages: vec![serde_json::json!({"role":"user","content":"hi"})],
             tools: Vec::new(),
             max_tokens: 32,
+            provider: crate::config::Provider::Zen,
+            protocol: Protocol::Responses,
+            api_key: None,
         };
         let responses = Protocol::Responses.request_body(&request);
         assert!(responses.get("input").is_some());

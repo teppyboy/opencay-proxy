@@ -1,11 +1,13 @@
 use bytes::Bytes;
 use futures_util::{stream, Stream, StreamExt};
+mod catalog;
 mod protocol;
 mod reasoning;
 mod session;
 mod tools;
 mod version;
 
+pub use catalog::ModelInfo;
 pub use protocol::Protocol;
 pub use tools::with_required_tools;
 
@@ -14,8 +16,30 @@ use serde_json::Value;
 use std::error::Error;
 use std::pin::Pin;
 
-pub const MODELS_ENDPOINT: &str = "https://opencode.ai/zen/v1/models";
-pub const CHAT_ENDPOINT: &str = "https://opencode.ai/inference/v1/chat/completions";
+pub const MODELS_ENDPOINT: &str = "https://opencode.ai/inference/v1/models";
+
+fn endpoint_url(provider: crate::config::Provider, protocol: Protocol) -> &'static str {
+    match (provider, protocol) {
+        (crate::config::Provider::Zen, Protocol::Chat) => {
+            "https://opencode.ai/inference/openai/v1/chat/completions"
+        }
+        (crate::config::Provider::Zen, Protocol::Responses) => {
+            "https://opencode.ai/inference/openai/v1/responses"
+        }
+        (crate::config::Provider::Zen, Protocol::Messages) => {
+            "https://opencode.ai/inference/anthropic/v1/messages"
+        }
+        (crate::config::Provider::Go, Protocol::Chat) => {
+            "https://opencode.ai/inference/go/openai/v1/chat/completions"
+        }
+        (crate::config::Provider::Go, Protocol::Responses) => {
+            "https://opencode.ai/inference/go/openai/v1/responses"
+        }
+        (crate::config::Provider::Go, Protocol::Messages) => {
+            "https://opencode.ai/inference/go/anthropic/v1/messages"
+        }
+    }
+}
 
 pub type BoxError = Box<dyn Error + Send + Sync>;
 pub type Result<T> = std::result::Result<T, BoxError>;
@@ -45,28 +69,13 @@ pub struct ChatRequest {
     pub messages: Vec<Value>,
     pub tools: Vec<Value>,
     pub max_tokens: u32,
+    pub provider: crate::config::Provider,
+    pub protocol: Protocol,
+    pub api_key: Option<String>,
 }
 
-#[derive(Debug, serde::Deserialize)]
-struct ModelsResponse {
-    data: Vec<Model>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct Model {
-    id: String,
-}
-
-pub async fn list_models() -> Result<Vec<String>> {
-    let response = Client::new().get(MODELS_ENDPOINT).send().await?;
-    let response = response.error_for_status()?;
-    Ok(response
-        .json::<ModelsResponse>()
-        .await?
-        .data
-        .into_iter()
-        .map(|model| model.id)
-        .collect())
+pub async fn list_models(config: &crate::config::RuntimeConfig) -> Result<Vec<ModelInfo>> {
+    Ok(catalog::fetch(config).await?.into_values().collect())
 }
 
 pub async fn chat_stream(request: ChatRequest) -> Result<ChatStream> {
@@ -74,14 +83,21 @@ pub async fn chat_stream(request: ChatRequest) -> Result<ChatStream> {
 }
 
 async fn send_chat_stream(request: &ChatRequest) -> Result<ChatStream> {
-    let protocol = Protocol::for_model(&request.model);
+    let protocol = request.protocol;
     let body = protocol.request_body(request);
     let session = session::proxy_session_id();
+    let endpoint = endpoint_url(request.provider, request.protocol);
     let response = Client::new()
-        .post(protocol.url())
+        .post(endpoint)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .header(reqwest::header::ACCEPT, "text/event-stream")
-        .header(reqwest::header::AUTHORIZATION, "Bearer public")
+        .header(
+            reqwest::header::AUTHORIZATION,
+            request
+                .api_key
+                .as_deref()
+                .map_or("Bearer public".to_string(), |key| format!("Bearer {key}")),
+        )
         .header(reqwest::header::USER_AGENT, version::user_agent().await)
         .header("x-opencode-client", "cli")
         .header("x-opencode-project", "global")
@@ -243,6 +259,9 @@ mod tests {
                 serde_json::json!({"type":"function","function":{"name":"read","description":"Read a file","parameters":{"type":"object","properties":{"path":{"type":"string"}}}}}),
             ],
             max_tokens: 16,
+            provider: crate::config::Provider::Zen,
+            protocol: Protocol::Chat,
+            api_key: None,
         };
         let mut stream = chat_stream(request).await.unwrap();
         let mut found = false;
