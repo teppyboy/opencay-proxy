@@ -30,6 +30,8 @@ impl Protocol {
     pub fn request_body(self, request: &crate::provider::opencode::ChatRequest) -> Value {
         let messages =
             crate::provider::opencode::reasoning::with_reasoning_content(&request.messages);
+        let effort = request.reasoning_effort.as_deref();
+        let reasoning = effort.map(|effort| json!({"effort": effort, "summary": "auto"}));
         match self {
             Self::Chat => json!({
                 "model": request.model,
@@ -39,6 +41,7 @@ impl Protocol {
                 "stream": true,
                 "stream_options": {"include_usage": true},
                 "max_tokens": request.max_tokens,
+                "reasoning_effort": effort,
             }),
             Self::Responses => json!({
                 "model": request.model,
@@ -48,6 +51,7 @@ impl Protocol {
                 "stream": true,
                 "store": false,
                 "max_output_tokens": request.max_tokens,
+                "reasoning": reasoning,
             }),
             Self::Messages => json!({
                 "model": request.model,
@@ -56,6 +60,13 @@ impl Protocol {
                 "tools": messages_tools(&request.tools),
                 "max_tokens": request.max_tokens,
                 "stream": true,
+                "thinking": effort.map(|effort| {
+                    if effort == "none" {
+                        json!({"type": "disabled"})
+                    } else {
+                        json!({"type": "enabled", "budget_tokens": thinking_budget(effort)})
+                    }
+                }),
             }),
         }
     }
@@ -66,6 +77,16 @@ impl Protocol {
             Self::Responses => normalize_responses_chunk(chunk),
             Self::Messages => normalize_messages_chunk(chunk),
         }
+    }
+}
+
+fn thinking_budget(effort: &str) -> u64 {
+    match effort {
+        "low" => 4_096,
+        "medium" => 16_384,
+        "high" => 32_768,
+        "xhigh" | "max" => 65_536,
+        _ => 8_192,
     }
 }
 
@@ -260,6 +281,8 @@ mod tests {
             provider: crate::config::Provider::Zen,
             protocol: Protocol::Responses,
             api_key: None,
+            reasoning_effort: None,
+            supported_reasoning: None,
         };
         let responses = Protocol::Responses.request_body(&request);
         assert!(responses.get("input").is_some());
@@ -270,5 +293,20 @@ mod tests {
         assert!(messages.get("messages").is_some());
         assert!(messages.get("system").is_some());
         assert_eq!(messages["max_tokens"], 32);
+
+        let mut request = request;
+        request.reasoning_effort = Some("high".into());
+        assert_eq!(
+            Protocol::Chat.request_body(&request)["reasoning_effort"],
+            "high"
+        );
+        assert_eq!(
+            Protocol::Responses.request_body(&request)["reasoning"]["effort"],
+            "high"
+        );
+        assert_eq!(
+            Protocol::Messages.request_body(&request)["thinking"]["type"],
+            "enabled"
+        );
     }
 }

@@ -27,6 +27,15 @@ struct IncomingChatRequest {
     max_completion_tokens: Option<u32>,
     #[serde(default)]
     stream: bool,
+    #[serde(default)]
+    reasoning_effort: Option<String>,
+    #[serde(default)]
+    reasoning: Option<ReasoningRequest>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReasoningRequest {
+    effort: Option<String>,
 }
 
 use clap::Parser;
@@ -168,6 +177,32 @@ async fn chat_completions(request: Request) -> Response {
             error_json(format!("Model is not available: {model}")),
         );
     };
+    let reasoning_effort = incoming.reasoning_effort.clone().or_else(|| {
+        incoming
+            .reasoning
+            .as_ref()
+            .and_then(|reasoning| reasoning.effort.clone())
+    });
+    if let Some(effort) = &reasoning_effort {
+        let supported = info
+            .raw
+            .get("reasoning_options")
+            .and_then(Value::as_array)
+            .map(|options| {
+                options
+                    .iter()
+                    .flat_map(|option| option["values"].as_array().into_iter().flatten())
+                    .filter_map(Value::as_str)
+                    .any(|value| value == effort)
+            })
+            .unwrap_or(true);
+        if !supported {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                error_json(format!("Unsupported reasoning effort: {effort}")),
+            );
+        }
+    }
     let tools = if info.free {
         with_required_tools(incoming.tools)
     } else {
@@ -184,6 +219,20 @@ async fn chat_completions(request: Request) -> Response {
         provider: info.provider,
         protocol: info.protocol,
         api_key: config.next_key(info.provider),
+        reasoning_effort,
+        supported_reasoning: info
+            .raw
+            .get("reasoning_options")
+            .and_then(Value::as_array)
+            .map(|options| {
+                options
+                    .iter()
+                    .filter_map(|option| option["values"].as_array())
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            }),
     };
     let upstream = match opencode::chat_stream(request_data).await {
         Ok(stream) => stream,

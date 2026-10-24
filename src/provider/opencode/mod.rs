@@ -72,6 +72,8 @@ pub struct ChatRequest {
     pub provider: crate::config::Provider,
     pub protocol: Protocol,
     pub api_key: Option<String>,
+    pub reasoning_effort: Option<String>,
+    pub supported_reasoning: Option<Vec<String>>,
 }
 
 pub async fn list_models(config: &crate::config::RuntimeConfig) -> Result<Vec<ModelInfo>> {
@@ -262,6 +264,8 @@ mod tests {
             provider: crate::config::Provider::Zen,
             protocol: Protocol::Chat,
             api_key: None,
+            reasoning_effort: None,
+            supported_reasoning: None,
         };
         let mut stream = chat_stream(request).await.unwrap();
         let mut found = false;
