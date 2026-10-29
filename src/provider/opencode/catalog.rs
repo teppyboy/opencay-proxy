@@ -1,4 +1,6 @@
+use super::http::{self, HeaderList};
 use super::protocol::Protocol;
+use super::BoxError;
 use crate::config::{Provider, RuntimeConfig};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -17,12 +19,10 @@ struct ModelsResponse {
     data: Vec<Value>,
 }
 
-pub async fn fetch(config: &RuntimeConfig) -> Result<HashMap<String, ModelInfo>, reqwest::Error> {
+pub async fn fetch(config: &RuntimeConfig) -> Result<HashMap<String, ModelInfo>, BoxError> {
     let mut catalog = HashMap::new();
-    let client = reqwest::Client::new();
-    let metadata = fetch_metadata(&client).await;
+    let metadata = fetch_metadata().await;
     add_models(
-        &client,
         "https://opencode.ai/inference/v1/models",
         Provider::Zen,
         config.has_keys(Provider::Zen),
@@ -32,7 +32,6 @@ pub async fn fetch(config: &RuntimeConfig) -> Result<HashMap<String, ModelInfo>,
     .await?;
     if config.has_keys(Provider::Go) {
         add_models(
-            &client,
             "https://opencode.ai/inference/go/v1/models",
             Provider::Go,
             true,
@@ -45,36 +44,31 @@ pub async fn fetch(config: &RuntimeConfig) -> Result<HashMap<String, ModelInfo>,
 }
 
 async fn add_models(
-    client: &reqwest::Client,
     endpoint: &str,
     provider: Provider,
     include_paid: bool,
     metadata: &HashMap<String, HashMap<String, Value>>,
     catalog: &mut HashMap<String, ModelInfo>,
-) -> Result<(), reqwest::Error> {
-    let response = client
-        .get(endpoint)
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<ModelsResponse>()
-        .await?;
+) -> Result<(), BoxError> {
+    let (status, body) = http::get_text(endpoint, &HeaderList::new()).await?;
+    if !(200..300).contains(&status) {
+        return Err(format!("model catalog request to {endpoint} failed ({status}): {body}").into());
+    }
+    let response: ModelsResponse = serde_json::from_str(&body)?;
+    let provider_key = match provider {
+        Provider::Zen => "opencode",
+        Provider::Go => "opencode-go",
+    };
     for raw in response.data {
         let Some(id) = raw.get("id").and_then(Value::as_str).map(str::to_owned) else {
             continue;
         };
-        let free = id.ends_with("-free") || id == "big-pickle";
+        let model_metadata = metadata
+            .get(provider_key)
+            .and_then(|models| models.get(&id));
+        let free = is_free(model_metadata).unwrap_or_else(|| id.ends_with("-free") || id == "big-pickle");
         if free || include_paid {
-            let provider_key = match provider {
-                Provider::Zen => "opencode",
-                Provider::Go => "opencode-go",
-            };
-            let raw = merge_metadata(
-                raw,
-                metadata
-                    .get(provider_key)
-                    .and_then(|models| models.get(&id)),
-            );
+            let raw = merge_metadata(raw, model_metadata);
             catalog.insert(
                 id.clone(),
                 ModelInfo {
@@ -90,11 +84,18 @@ async fn add_models(
     Ok(())
 }
 
-async fn fetch_metadata(client: &reqwest::Client) -> HashMap<String, HashMap<String, Value>> {
-    let Ok(response) = client.get("https://models.dev/api.json").send().await else {
+/// The CLI reads the catalog from `models.opencode.ai`; `models.dev` mirrors
+/// it but is not what the official client uses.
+const CATALOG_ENDPOINT: &str = "https://models.opencode.ai/api.json";
+
+async fn fetch_metadata() -> HashMap<String, HashMap<String, Value>> {
+    let Ok((status, body)) = http::get_text(CATALOG_ENDPOINT, &HeaderList::new()).await else {
         return HashMap::new();
     };
-    let Ok(catalog) = response.json::<HashMap<String, Value>>().await else {
+    if !(200..300).contains(&status) {
+        return HashMap::new();
+    }
+    let Ok(catalog) = serde_json::from_str::<HashMap<String, Value>>(&body) else {
         return HashMap::new();
     };
     ["opencode", "opencode-go"]
@@ -112,8 +113,15 @@ async fn fetch_metadata(client: &reqwest::Client) -> HashMap<String, HashMap<Str
         .collect()
 }
 
-fn merge_metadata(mut upstream: Value, metadata: Option<&Value>) -> Value {
-    let Some(metadata) = metadata.and_then(Value::as_object) else {
+/// Whether the catalog lists a model as free. `None` when the catalog has no
+/// entry for it, so the caller can fall back to the id heuristic.
+fn is_free(metadata: Option<&Value>) -> Option<bool> {
+    let cost = metadata?.get("cost")?;
+    let input = cost.get("input")?.as_f64()?;
+    Some(input == 0.0)
+}
+
+fn merge_metadata(mut upstream: Value, metadata: Option<&Value>) -> Value {    let Some(metadata) = metadata.and_then(Value::as_object) else {
         return upstream;
     };
     let Some(upstream_object) = upstream.as_object_mut() else {
@@ -148,9 +156,21 @@ fn protocol_for(provider: Provider, model: &str) -> Protocol {
 
 #[cfg(test)]
 mod tests {
-    use super::protocol_for;
+    use super::{is_free, protocol_for};
     use crate::config::Provider;
     use crate::provider::opencode::Protocol;
+
+    #[test]
+    fn detects_free_models_from_the_catalog_cost() {
+        let free = serde_json::json!({"cost": {"input": 0, "output": 0}});
+        let paid = serde_json::json!({"cost": {"input": 1.5, "output": 6}});
+        assert_eq!(is_free(Some(&free)), Some(true));
+        assert_eq!(is_free(Some(&paid)), Some(false));
+        // A model the catalog does not list falls back to the id heuristic.
+        assert_eq!(is_free(None), None);
+        // `grok-code` is free without a `-free` suffix.
+        assert!(is_free(Some(&free)).unwrap());
+    }
 
     #[test]
     fn preserves_upstream_fields_and_adds_missing_catalog_metadata() {

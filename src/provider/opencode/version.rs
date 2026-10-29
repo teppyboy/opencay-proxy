@@ -1,9 +1,10 @@
-use reqwest::Client;
+use super::http::{self, HeaderList};
 use serde::Deserialize;
-use std::time::Duration;
 use tokio::sync::OnceCell;
 
-const LATEST_PACKAGE_ENDPOINT: &str = "https://registry.npmjs.org/opencode-ai/latest";
+/// The v2 CLI is published as `@opencode/cli`; `opencode-ai` still points at
+/// the v1 installer wrapper.
+const LATEST_PACKAGE_ENDPOINT: &str = "https://registry.npmjs.org/@opencode%2Fcli/latest";
 const FALLBACK_VERSION: &str = "2.0.26";
 
 static VERSION: OnceCell<String> = OnceCell::const_new();
@@ -40,19 +41,13 @@ pub async fn user_agent() -> String {
 }
 
 async fn fetch_latest() -> Option<String> {
-    let client = Client::builder()
-        .timeout(Duration::from_secs(3))
-        .build()
+    let (status, body) = http::get_text(LATEST_PACKAGE_ENDPOINT, &HeaderList::new())
+        .await
         .ok()?;
-    client
-        .get(LATEST_PACKAGE_ENDPOINT)
-        .send()
-        .await
-        .ok()?
-        .error_for_status()
-        .ok()?
-        .json::<PackageMetadata>()
-        .await
+    if !(200..300).contains(&status) {
+        return None;
+    }
+    serde_json::from_str::<PackageMetadata>(&body)
         .ok()
         .map(|metadata| metadata.version)
 }

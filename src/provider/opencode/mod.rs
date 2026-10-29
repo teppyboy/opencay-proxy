@@ -1,6 +1,7 @@
 use bytes::Bytes;
 use futures_util::{stream, Stream, StreamExt};
 mod catalog;
+mod http;
 mod protocol;
 mod reasoning;
 mod session;
@@ -11,7 +12,6 @@ pub use catalog::ModelInfo;
 pub use protocol::Protocol;
 pub use tools::with_required_tools;
 
-use reqwest::{Client, Response};
 use serde_json::Value;
 use std::error::Error;
 use std::pin::Pin;
@@ -89,45 +89,38 @@ async fn send_chat_stream(request: &ChatRequest) -> Result<ChatStream> {
     let body = protocol.request_body(request);
     let session = session::proxy_session_id();
     let endpoint = endpoint_url(request.provider, request.protocol);
-    let response = Client::new()
-        .post(endpoint)
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .header(reqwest::header::ACCEPT, "text/event-stream")
-        .header(
-            reqwest::header::AUTHORIZATION,
-            request
-                .api_key
-                .as_deref()
-                .map_or("Bearer public".to_string(), |key| format!("Bearer {key}")),
-        )
-        .header(reqwest::header::USER_AGENT, version::user_agent().await)
-        .header("x-opencode-client", "cli")
-        .header("x-opencode-project", "global")
-        .header("x-opencode-session", session)
-        .header("x-opencode-session-id", session)
-        .header("x-session-affinity", session)
-        .header("x-session-id", session)
-        .json(&body)
-        .send()
-        .await?;
-    tracing::debug!(model = %request.model, "upstream request sent");
-    ensure_success(response, protocol).await
-}
-
-async fn ensure_success(response: Response, protocol: Protocol) -> Result<ChatStream> {
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await?;
+    let auth = request
+        .api_key
+        .as_deref()
+        .map_or("Bearer public".to_string(), |key| format!("Bearer {key}"));
+    let headers = vec![
+        ("Content-Type".to_string(), "application/json".to_string()),
+        ("Accept".to_string(), "text/event-stream".to_string()),
+        ("Authorization".to_string(), auth),
+        ("User-Agent".to_string(), version::user_agent().await),
+        ("x-opencode-client".to_string(), "cli".to_string()),
+        ("x-opencode-project".to_string(), "global".to_string()),
+        ("x-opencode-session".to_string(), session.to_string()),
+        ("x-opencode-session-id".to_string(), session.to_string()),
+        ("x-session-affinity".to_string(), session.to_string()),
+        ("x-session-id".to_string(), session.to_string()),
+    ];
+    let body_json = serde_json::to_string(&body)?;
+    tracing::debug!(model = %request.model, "upstream request sent via curl-impersonate");
+    let (status, body_stream) = http::post_stream(endpoint, &headers, &body_json).await?;
+    if !(200..300).contains(&status) {
+        let mut error_body = String::new();
+        let mut chunks = body_stream;
+        while let Some(chunk) = chunks.next().await {
+            error_body.push_str(&String::from_utf8_lossy(&chunk?));
+        }
         return Err(UpstreamError {
-            status: status.as_u16(),
-            body,
+            status,
+            body: error_body,
         }
         .into());
     }
-    Ok(Box::pin(parse_sse_stream(
-        response.bytes_stream(),
-        protocol,
-    )))
+    Ok(Box::pin(parse_sse_stream(body_stream, protocol)))
 }
 
 pub(crate) fn parse_sse_stream<S, E>(
@@ -249,6 +242,7 @@ mod tests {
         assert!(!version::is_supported("1.19.3"));
         assert!(!version::is_supported("latest"));
     }
+
 
     #[tokio::test]
     #[ignore]
